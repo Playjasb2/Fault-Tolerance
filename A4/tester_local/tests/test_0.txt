@@ -1,0 +1,14 @@
+short, single client
+0 1
+ops_sample.txt 1 5
+#  - First line is the test name.
+#  - Comment lines begin with '#' but cannot have comment on first line.
+#  - Second non-comment line sets the 'fail_period' (how often failures occur)
+#    and verbosity level. (Here fail_period = 0 means no failures.)
+#  - Subsequent lines define the clients that will be started concurrently
+#    - Each client in the test file is specified as:
+#      "ops_file_name" "count" "timeout"
+#        - "ops_file_name" is the file containing the list of client ops
+#        - "count" is number of times a new client process will run this set of
+#          ops (sequentially, i.e., each starts after previous one finishes)
+#        - "timeout" is time limit (in seconds) for client to complete its ops
