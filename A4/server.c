@@ -343,28 +343,18 @@ static void process_client_message(int fd)
 		}
 		hash_unlock(&primary_hash, request->key);
 
-		// TODO: forward the PUT request to the secondary replica
-		// ...
-
-		log_write("Sizes: %d %ld\n", request->hdr.length, sizeof(operation_request));
-		log_write("Request: %d %d %d\n", request->type, request->hdr.type, request->hdr.length);
-		log_write("Value length: %d\n", strlen(request->value));
-
-		log_write("Secondary fd: %d\n", secondary_fd);
-
+		// Forwards the PUT request to the secondary replica
 		send_msg(secondary_fd, request, request->hdr.length);
 
-		log_write("Waiting for response back from secondary server.\n");
 		if (!recv_msg(secondary_fd, &request, request->hdr.length, MSG_OPERATION_RESP))
 		{
-			log_write("We have failed\n");
+			log_write("Problem with the secondary replica.\n");
 			if (old_value != NULL)
 			{
 				free(old_value);
 			}
 			return;
 		}
-		log_write("Got the response.\n");
 
 		// Need to free the old value (if there was any)
 		if (old_value != NULL)
@@ -421,18 +411,6 @@ static bool process_server_message(int fd)
 	}
 	operation_request *request = (operation_request *)req_buffer;
 
-	log_write("WE MADE IT! WOOOOT!!!!!!\n");
-
-	// NOOP operation request is used to indicate the last message in an UPDATE sequence
-	// if (request->type == OP_NOOP)
-	// {
-	// 	log_write("Received the last server message, closing connection\n");
-	// 	return false;
-	// }
-
-	// TODO: process the message and send the response
-	// ...
-
 	char resp_buffer[MAX_MSG_LEN] = {0};
 	operation_response *response = (operation_response *)resp_buffer;
 	size_t value_size = request->hdr.length - sizeof(*request);
@@ -450,8 +428,7 @@ static bool process_server_message(int fd)
 		return false;
 	case OP_PUT:
 	{
-		log_write("Entering OP_PUT\n");
-
+		// Check that this server is the correct secondary replica for the given PUT request
 		int key_srv_id = key_server_id(request->key, num_servers);
 		if ((key_srv_id != server_id) && (key_srv_id != primary_sid))
 		{
@@ -463,6 +440,7 @@ static bool process_server_message(int fd)
 			break;
 		}
 
+		// Handle out of memory error
 		if (value_copy == NULL)
 		{
 			log_perror("malloc");
@@ -470,15 +448,13 @@ static bool process_server_message(int fd)
 			response->status = OUT_OF_SPACE;
 			break;
 		}
-		log_write("--------------\n");
 		memcpy(value_copy, request->value, value_size);
 
 		void *old_value = NULL;
 		size_t old_value_sz = 0;
 
-		log_write("--------------\n");
+		// Put the key-value pair in the secondary table
 		hash_lock(&secondary_hash, request->key);
-		log_write("--------------\n");
 		if (!hash_put(&secondary_hash, request->key, value_copy, value_size, &old_value, &old_value_sz))
 		{
 			log_error("sid %d: Out of memory\n", server_id);
@@ -491,6 +467,7 @@ static bool process_server_message(int fd)
 		{
 			free(old_value);
 		}
+
 		response->status = SUCCESS;
 		break;
 	}
@@ -499,8 +476,7 @@ static bool process_server_message(int fd)
 		return false;
 	}
 
-	log_write("Sending message back to other server\n");
-
+	// Send a response back to the primary server
 	send_msg(fd, response, sizeof(*response) + value_sz);
 
 	return true;
@@ -571,9 +547,6 @@ static bool run_server_loop()
 
 	// Server sits in an infinite loop waiting for incoming connections from mserver/clients
 	// and for incoming messages from already connected mserver/clients
-	//
-	// TODO: process connections and messages from other servers as well
-	// ...
 
 	for (;;)
 	{
@@ -631,6 +604,7 @@ static bool run_server_loop()
 			}
 		}
 
+		// Incoming connection from a server
 		if (FD_ISSET(my_servers_fd, &rset))
 		{
 			log_write("Accepted server connection\n");
@@ -680,14 +654,11 @@ static bool run_server_loop()
 			}
 		}
 
-		log_write("WE GOT HERE!\n");
-
+		// Check for any messages from connected servers
 		for (int i = 0; i < MAX_SERVER_SESSIONS; i++)
 		{
-			log_write("~WE GOT HERE!\n");
 			if ((server_fd_table[i] != -1) && FD_ISSET(server_fd_table[i], &rset))
 			{
-				log_write("Processing server message\n");
 				process_server_message(server_fd_table[i]);
 
 				FD_CLR(client_fd_table[i], &allset);
