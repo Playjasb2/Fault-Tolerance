@@ -270,7 +270,7 @@ static void cleanup()
 static const int max_cmd_length = 32;
 
 // WARNING: YOU WILL NEED TO CHANGE THIS PATH TO MATCH YOUR SETUP!
-static const char *remote_path = "csc469_a4/";
+static const char *remote_path = "~/Desktop/CSC469/A4/";
 
 // Generate a command to start a key-value server (see server.c for arguments description)
 static char **get_spawn_cmd(int sid)
