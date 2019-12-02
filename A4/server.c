@@ -358,6 +358,10 @@ static void process_client_message(int fd)
 		if (!recv_msg(secondary_fd, &request, request->hdr.length, MSG_OPERATION_RESP))
 		{
 			log_write("We have failed\n");
+			if (old_value != NULL)
+			{
+				free(old_value);
+			}
 			return;
 		}
 		log_write("Got the response.\n");
