@@ -532,18 +532,76 @@ static bool process_mserver_message(int fd, bool *shutdown_requested)
 	return true;
 }
 
+static void *run_client_loop()
+{
+	fd_set rset, allset;
+	FD_ZERO(&allset);
+	FD_SET(my_clients_fd, &allset);
+
+	int maxfd = my_clients_fd;
+
+	for (;;)
+	{
+		rset = allset;
+
+		log_write("Waiting for new messages\n");
+		int num_ready_fds = select(maxfd + 1, &rset, NULL, NULL, NULL);
+		if (num_ready_fds < 0)
+		{
+			log_perror("select");
+			return false;
+		}
+
+		if (num_ready_fds <= 0)
+		{
+			continue;
+		}
+
+		// Incoming connection from a client
+		if (FD_ISSET(my_clients_fd, &rset))
+		{
+			int fd_idx = accept_connection(my_clients_fd, client_fd_table, MAX_CLIENT_SESSIONS);
+			if (fd_idx >= 0)
+			{
+				FD_SET(client_fd_table[fd_idx], &allset);
+				maxfd = max(maxfd, client_fd_table[fd_idx]);
+			}
+
+			if (--num_ready_fds <= 0)
+			{
+				continue;
+			}
+		}
+
+		// Check for any messages from connected clients
+		for (int i = 0; i < MAX_CLIENT_SESSIONS; i++)
+		{
+			if ((client_fd_table[i] != -1) && FD_ISSET(client_fd_table[i], &rset))
+			{
+				process_client_message(client_fd_table[i]);
+				// Close connection after processing (semantics are "one connection per request")
+				FD_CLR(client_fd_table[i], &allset);
+				close_safe(&(client_fd_table[i]));
+
+				if (--num_ready_fds <= 0)
+				{
+					break;
+				}
+			}
+		}
+	}
+}
+
 // Returns false if stopped due to errors, true if shutdown was requested
 static bool run_server_loop()
 {
 	// Usual preparation stuff for select()
 	fd_set rset, allset;
 	FD_ZERO(&allset);
-	FD_SET(my_clients_fd, &allset);
 	FD_SET(my_mservers_fd, &allset);
 	FD_SET(my_servers_fd, &allset);
 
-	int maxfd = max(my_clients_fd, my_mservers_fd);
-	maxfd = max(maxfd, my_servers_fd);
+	int maxfd = max(my_servers_fd, my_mservers_fd);
 
 	// Server sits in an infinite loop waiting for incoming connections from mserver/clients
 	// and for incoming messages from already connected mserver/clients
@@ -621,39 +679,6 @@ static bool run_server_loop()
 			}
 		}
 
-		// Incoming connection from a client
-		if (FD_ISSET(my_clients_fd, &rset))
-		{
-			int fd_idx = accept_connection(my_clients_fd, client_fd_table, MAX_CLIENT_SESSIONS);
-			if (fd_idx >= 0)
-			{
-				FD_SET(client_fd_table[fd_idx], &allset);
-				maxfd = max(maxfd, client_fd_table[fd_idx]);
-			}
-
-			if (--num_ready_fds <= 0)
-			{
-				continue;
-			}
-		}
-
-		// Check for any messages from connected clients
-		for (int i = 0; i < MAX_CLIENT_SESSIONS; i++)
-		{
-			if ((client_fd_table[i] != -1) && FD_ISSET(client_fd_table[i], &rset))
-			{
-				process_client_message(client_fd_table[i]);
-				// Close connection after processing (semantics are "one connection per request")
-				FD_CLR(client_fd_table[i], &allset);
-				close_safe(&(client_fd_table[i]));
-
-				if (--num_ready_fds <= 0)
-				{
-					break;
-				}
-			}
-		}
-
 		// Check for any messages from connected servers
 		for (int i = 0; i < MAX_SERVER_SESSIONS; i++)
 		{
@@ -688,6 +713,10 @@ int main(int argc, char **argv)
 	{
 		return 1;
 	}
+
+	pthread_t client_thread;
+
+	pthread_create(&client_thread, NULL, &run_client_loop, NULL);
 
 	bool result = run_server_loop();
 
