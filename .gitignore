@@ -56,3 +56,8 @@ dkms.conf
 
 # A3 benchmark files
 A3/benchmarks/*
+
+# A4 test logs and operation files
+A4/tester_local/csc469_a4
+A4/**/ops_1*
+A4/**/*.log
