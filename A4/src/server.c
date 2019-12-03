@@ -346,7 +346,7 @@ static void process_client_message(int fd)
 		// Forwards the PUT request to the secondary replica
 		send_msg(secondary_fd, request, request->hdr.length);
 
-		if (!recv_msg(secondary_fd, &request, request->hdr.length, MSG_OPERATION_RESP))
+		if (!recv_msg(secondary_fd, &request, sizeof(response), MSG_OPERATION_RESP))
 		{
 			log_write("Problem with the secondary replica.\n");
 			if (old_value != NULL)
@@ -361,6 +361,8 @@ static void process_client_message(int fd)
 		{
 			free(old_value);
 		}
+
+		response->hdr.length = sizeof(response);
 
 		response->status = SUCCESS;
 		break;
