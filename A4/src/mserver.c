@@ -134,6 +134,44 @@ static int num_servers = 0;
 // Server state information
 static server_node *server_nodes = NULL;
 
+static time_t *last_heartbeats;
+
+static int failed_server = -1;
+
+// Threshold that the heartbeats must come within
+#define HEARTBEAT_THRESHOLD 10
+
+// Returns true only if there's a failed server
+static bool check_for_failed_server()
+{
+	time_t now = time(NULL);
+	for (int i = 0; i < num_servers; i++)
+	{
+		// Case where we still need to get the first heartbeat
+		if (last_heartbeats[i] == 0)
+		{
+			continue;
+		}
+		else if (now - last_heartbeats[i] > HEARTBEAT_THRESHOLD)
+		{
+			failed_server = i;
+			log_write("Server %d failed\n", i);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+// Update a server's timestamp for its last heartbeat
+// Also checks for any failed server
+static void update_heartbeat(int server_id)
+{
+	time_t now = time(NULL);
+	last_heartbeats[server_id] = now;
+	check_for_failed_server();
+}
+
 // Read the configuration file, fill in the server_nodes array
 // Returns false if the configuration is invalid
 static bool read_config_file()
@@ -226,6 +264,9 @@ static bool init_mserver()
 	{
 		goto cleanup;
 	}
+
+	// Initialize array to keep track of heartbeats
+	last_heartbeats = calloc(num_servers, sizeof(time_t));
 
 	// Start key-value servers
 	if (!init_servers())
@@ -532,9 +573,19 @@ static bool process_server_message(int fd)
 	log_write("%s Receiving a server message\n",
 			  current_time_str(timebuf, TIME_STR_SIZE));
 
-	// TODO: read and process the message
-	// ...
-	(void)fd;
+	// Read and parse the message
+	mserver_ctrl_request request = {0};
+	if (!recv_msg(fd, &request, sizeof(request), MSG_MSERVER_CTRL_REQ))
+	{
+		return false;
+	}
+
+	if (request.type == HEARTBEAT)
+	{
+		update_heartbeat(request.server_id);
+		return true;
+	}
+
 	return false;
 }
 
@@ -581,6 +632,11 @@ static bool run_mserver_loop()
 		if (num_ready_fds <= 0)
 		{
 			// Due to time out
+			// Check for any failed server
+			if (check_for_failed_server())
+			{
+				log_write("We have a failed server!\n");
+			}
 			continue;
 		}
 

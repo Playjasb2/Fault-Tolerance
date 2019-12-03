@@ -141,6 +141,24 @@ static void cleanup();
 
 static const int hash_size = 65536;
 
+static void *send_heart_beat()
+{
+	mserver_ctrl_request message;
+
+	message.hdr.length = sizeof(mserver_ctrl_request);
+	message.hdr.type = MSG_MSERVER_CTRL_REQ;
+	message.type = HEARTBEAT;
+
+	while (true)
+	{
+		message.server_id = server_id;
+		send_msg(mserver_fd_out, &message, sizeof(message));
+		sleep(4);
+	}
+
+	return NULL;
+}
+
 // Initialize and start the server
 static bool init_server()
 {
@@ -191,6 +209,9 @@ static bool init_server()
 
 	// TODO: Create a separate thread that takes care of sending periodic heartbeat messages
 	// ...
+
+	pthread_t heartbeat_thread;
+	pthread_create(&heartbeat_thread, NULL, &send_heart_beat, NULL);
 
 	log_write("Server initialized\n");
 	return true;
