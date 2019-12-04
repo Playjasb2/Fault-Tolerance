@@ -143,49 +143,53 @@ static int failed_server = -1;
 
 static int spawn_server(int sid);
 
-bool start_transfer(uint16_t, char* host, server_node* backup_server, server_ctrlreq_type type)
+static bool start_transfer(uint16_t port, char *host, server_node *backup_server, server_ctrlreq_type type)
 {
 	char req_buffer[MAX_MSG_LEN] = {0};
-	server_ctrl_request* req = (server_ctrl_request* ) req_buffer;
+	server_ctrl_request *req = (server_ctrl_request *)req_buffer;
 	req->hdr.type = MSG_SERVER_CTRL_REQ;
 	req->type = UPDATE_PRIMARY;
 	req->port = port;
 
 	int host_name_len = strlen(host) + 1;
 	strncpy(req->host_name, host, host_name_len);
-	
-	if(!send_msg(backup_server->socket_fd_out, req_buffer, sizeof(server_ctrl_request) + host_name_len))
+
+	if (!send_msg(backup_server->socket_fd_out, req_buffer, sizeof(server_ctrl_request) + host_name_len))
 	{
 		log_write("failed to send recover message");
 		return false;
 	}
 
-	server_ctrl_response res = { 0 };
-	if(!recv_msg(backup_server->socket_fd_in, &res, sizeof(server_ctrl_response), MSG_SERVER_CTRL_RESP) || (res.status != CTRLREQ_SUCCESS))
+	server_ctrl_response res = {0};
+	if (!recv_msg(backup_server->socket_fd_in, &res, sizeof(server_ctrl_response), MSG_SERVER_CTRL_RESP) || (res.status != CTRLREQ_SUCCESS))
 	{
 		log_write("failed to start recovery");
 		return false;
 	}
+
+	return true;
 }
 
 bool start_recovery(int sid)
 {
 	spawn_server(sid);
 
-	server_node* server = &server_nodes[sid];
+	server_node *server = &server_nodes[sid];
 
 	uint16_t port = server->cport;
 	char *at = strchr(server->host_name, '@');
 	char *host = (at == NULL) ? server->host_name : (at + 1);
 
-	server_node* primary_replica = &server_nodes[secondary_server_id(sid, num_servers)];
-	server_node* secondary_replica = &server_nodes[primary_server_id(sid, num_servers)];
+	server_node *primary_replica = &server_nodes[secondary_server_id(sid, num_servers)];
+	server_node *secondary_replica = &server_nodes[primary_server_id(sid, num_servers)];
 
-	if(!start_transfer(port, host, primary_replica, UPDATE_PRIMARY)) {
+	if (!start_transfer(port, host, primary_replica, UPDATE_PRIMARY))
+	{
 		return false;
 	}
 
-	if(!start_transfer(port, host, secondary_replica, UPDATE_SECONDARY)) {
+	if (!start_transfer(port, host, secondary_replica, UPDATE_SECONDARY))
+	{
 		return false;
 	}
 
