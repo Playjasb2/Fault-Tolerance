@@ -141,6 +141,57 @@ static int failed_server = -1;
 // Threshold that the heartbeats must come within
 #define HEARTBEAT_THRESHOLD 10
 
+static int spawn_server(int sid);
+
+bool start_transfer(uint16_t, char* host, server_node* backup_server, server_ctrlreq_type type)
+{
+	char req_buffer[MAX_MSG_LEN] = {0};
+	server_ctrl_request* req = (server_ctrl_request* ) req_buffer;
+	req->hdr.type = MSG_SERVER_CTRL_REQ;
+	req->type = UPDATE_PRIMARY;
+	req->port = port;
+
+	int host_name_len = strlen(host) + 1;
+	strncpy(req->host_name, host, host_name_len);
+	
+	if(!send_msg(backup_server->socket_fd_out, req_buffer, sizeof(server_ctrl_request) + host_name_len))
+	{
+		log_write("failed to send recover message");
+		return false;
+	}
+
+	server_ctrl_response res = { 0 };
+	if(!recv_msg(backup_server->socket_fd_in, &res, sizeof(server_ctrl_response), MSG_SERVER_CTRL_RESP) || (res.status != CTRLREQ_SUCCESS))
+	{
+		log_write("failed to start recovery");
+		return false;
+	}
+}
+
+bool start_recovery(int sid)
+{
+	spawn_server(sid);
+
+	server_node* server = &server_nodes[sid];
+
+	uint16_t port = server->cport;
+	char *at = strchr(server->host_name, '@');
+	char *host = (at == NULL) ? server->host_name : (at + 1);
+
+	server_node* primary_replica = &server_nodes[secondary_server_id(sid, num_servers)];
+	server_node* secondary_replica = &server_nodes[primary_server_id(sid, num_servers)];
+
+	if(!start_transfer(port, host, primary_replica, UPDATE_PRIMARY)) {
+		return false;
+	}
+
+	if(!start_transfer(port, host, secondary_replica, UPDATE_SECONDARY)) {
+		return false;
+	}
+
+	return true;
+}
+
 // Returns true only if there's a failed server
 static bool check_for_failed_server()
 {
@@ -154,6 +205,8 @@ static bool check_for_failed_server()
 		}
 		else if (now - last_heartbeats[i] > HEARTBEAT_THRESHOLD)
 		{
+			start_recovery(i);
+
 			failed_server = i;
 			log_write("Server %d failed\n", i);
 			return true;
@@ -169,7 +222,6 @@ static void update_heartbeat(int server_id)
 {
 	time_t now = time(NULL);
 	last_heartbeats[server_id] = now;
-	check_for_failed_server();
 }
 
 // Read the configuration file, fill in the server_nodes array
@@ -633,10 +685,7 @@ static bool run_mserver_loop()
 		{
 			// Due to time out
 			// Check for any failed server
-			if (check_for_failed_server())
-			{
-				log_write("We have a failed server!\n");
-			}
+			check_for_failed_server();
 			continue;
 		}
 
