@@ -508,11 +508,12 @@ static bool process_server_message(int fd)
 
 pthread_t transfer_thread;
 
-struct transfer_data
+typedef struct transfer_data_t
 {
 	hash_table* table;
 	int socket;
-};
+	bool primary;
+} transfer_data;
 
 static void copy_iterator_f(const char key[KEY_SIZE], void *value, size_t value_sz, void *arg)
 {
@@ -530,11 +531,22 @@ static void copy_iterator_f(const char key[KEY_SIZE], void *value, size_t value_
 	}
 }
 
-static void transfer(void* arg)
+static void *transfer(void* arg)
 {
 	transfer_data* data = (transfer_data*) arg;
 
 	hash_iterate(data->table, copy_iterator_f, arg);
+
+	mserver_ctrl_request request = { 0 };
+	request.hdr.type = MSG_MSERVER_CTRL_REQ;
+	request.type = data->primary ? UPDATED_PRIMARY : UPDATED_SECONDARY;
+	request.server_id = server_id;
+
+	log_write("FINISHED TRANSFER");
+
+	send_msg(mserver_fd_out, &request, sizeof(mserver_ctrl_request));
+
+	return NULL;
 }
 
 // Returns false if the message was invalid (so the connection will be closed)
@@ -581,22 +593,24 @@ static bool process_mserver_message(int fd, bool *shutdown_requested)
 	case UPDATE_PRIMARY:
 	{
 		transfer_data* data = (transfer_data*) malloc(sizeof(transfer_data));
-		data->socket = connect_to_server(request->host, request->port);
+		data->socket = connect_to_server(request->host_name, request->port);
 		data->table = &secondary_hash;
+		data->primary = true;
 
 		pthread_create(&transfer_thread, NULL, &transfer, data);
-		response->status = CTRLREQ_SUCCESS;
+		response.status = CTRLREQ_SUCCESS;
 		break;
 	}
 
 	case UPDATE_SECONDARY:
 	{
 		transfer_data* data = (transfer_data*) malloc(sizeof(transfer_data));
-		data->socket = connect_to_server(request->host, request->port);
+		data->socket = connect_to_server(request->host_name, request->port);
 		data->table = &primary_hash;
+		data->primary = false;
 
 		pthread_create(&transfer_thread, NULL, &transfer, data);
-		response->status = CTRLREQ_SUCCESS;
+		response.status = CTRLREQ_SUCCESS;
 		break;
 	}
 

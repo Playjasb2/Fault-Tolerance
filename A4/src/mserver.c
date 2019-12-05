@@ -29,6 +29,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdbool.h>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -143,12 +144,12 @@ static int failed_server = -1;
 
 static int spawn_server(int sid);
 
-bool start_transfer(uint16_t, char* host, server_node* backup_server, server_ctrlreq_type type)
+bool start_transfer(uint16_t port, char* host, server_node* backup_server, server_ctrlreq_type type)
 {
 	char req_buffer[MAX_MSG_LEN] = {0};
 	server_ctrl_request* req = (server_ctrl_request* ) req_buffer;
 	req->hdr.type = MSG_SERVER_CTRL_REQ;
-	req->type = UPDATE_PRIMARY;
+	req->type = type;
 	req->port = port;
 
 	int host_name_len = strlen(host) + 1;
@@ -160,12 +161,62 @@ bool start_transfer(uint16_t, char* host, server_node* backup_server, server_ctr
 		return false;
 	}
 
-	server_ctrl_response res = { 0 };
-	if(!recv_msg(backup_server->socket_fd_in, &res, sizeof(server_ctrl_response), MSG_SERVER_CTRL_RESP) || (res.status != CTRLREQ_SUCCESS))
+	bool status = false;
+	while(1)
+	{
+		char resp_buffer[MAX_MSG_LEN] = {0};
+		if(read_whole(backup_server->socket_fd_in, resp_buffer, sizeof(msg_hdr)) == 0)
+		{
+			log_write("message read failure");
+			return false;
+		}
+
+		msg_hdr* hdr = (msg_hdr*) resp_buffer;
+		log_write("read header: %hu", hdr->length);
+
+		switch(hdr->type)
+		{
+			case MSG_MSERVER_CTRL_REQ:
+			{
+				read_whole(backup_server->socket_fd_in, resp_buffer + sizeof(msg_hdr), sizeof(mserver_ctrl_request) - sizeof(msg_hdr));
+				
+				mserver_ctrl_request* request = (mserver_ctrl_request*) resp_buffer;
+				if(request->type == UPDATED_PRIMARY)
+				{
+					return true;
+				}
+				else if(request->type != HEARTBEAT)
+				{
+					log_write("invalid request message: %u\n", (unsigned int) request->type);
+					return false;
+				}
+				break;
+			}
+
+			case MSG_SERVER_CTRL_RESP:
+			{
+				log_write("MSG_SERVER_CTRL_RESP");
+				read_whole(backup_server->socket_fd_in, resp_buffer + sizeof(msg_hdr), sizeof(server_ctrl_response) - sizeof(msg_hdr));
+
+				server_ctrl_response* response = (server_ctrl_response*) resp_buffer;
+				return (response->status == CTRLREQ_SUCCESS);
+			}
+
+			default:
+			{
+				log_write("invalid message");
+				return false;
+			}
+		}
+	}
+
+	if(!status)
 	{
 		log_write("failed to start recovery");
 		return false;
 	}
+
+	return true;
 }
 
 bool start_recovery(int sid)
@@ -174,7 +225,7 @@ bool start_recovery(int sid)
 
 	server_node* server = &server_nodes[sid];
 
-	uint16_t port = server->cport;
+	uint16_t port = server->sport;
 	char *at = strchr(server->host_name, '@');
 	char *host = (at == NULL) ? server->host_name : (at + 1);
 
