@@ -592,6 +592,83 @@ static bool process_server_message(int fd)
 static const int select_timeout_interval = 1; // seconds
 
 // Returns false if stopped due to errors, true if shutdown was requested
+void *run_mserver_client_loop()
+{
+	// Usual preparation stuff for select()
+	fd_set rset, allset;
+	FD_ZERO(&allset);
+	// End-of-file on stdin (e.g. Ctrl+D in a terminal) is used to request shutdown
+	FD_SET(fileno(stdin), &allset);
+	FD_SET(clients_fd, &allset);
+
+	int maxfd = clients_fd;
+
+	// Metadata server sits in an infinite loop waiting for incoming connections from clients
+	// and for incoming messages from already connected servers and clients
+	for (;;)
+	{
+		rset = allset;
+
+		// Wait with timeout (in order to be able to handle asynchronous events such as heartbeat messages)
+		int num_ready_fds = select(maxfd + 1, &rset, NULL, NULL, NULL);
+		if (num_ready_fds < 0)
+		{
+			log_perror("select");
+			return false;
+		}
+
+		// Stop if detected EOF on stdin
+		if (FD_ISSET(fileno(stdin), &rset))
+		{
+			char buffer[1024];
+			if (fgets(buffer, sizeof(buffer), stdin) == NULL)
+			{
+				return NULL;
+			}
+		}
+
+		// TODO: implement failure detection and recovery
+		// Need to go through the list of servers and figure out which servers have not sent a heartbeat message yet
+		// within the timeout interval. Keep information in the server_node structure regarding when was the last
+		// heartbeat received from a server and compare to current time. Initiate recovery if discovered a failure.
+		// ...
+
+		// Incoming connection from a client
+		if (FD_ISSET(clients_fd, &rset))
+		{
+			int fd_idx = accept_connection(clients_fd, client_fd_table, MAX_CLIENT_SESSIONS);
+			if (fd_idx >= 0)
+			{
+				FD_SET(client_fd_table[fd_idx], &allset);
+				maxfd = max(maxfd, client_fd_table[fd_idx]);
+			}
+
+			if (--num_ready_fds <= 0)
+			{
+				continue;
+			}
+		}
+
+		// Check for any messages from connected clients
+		for (int i = 0; i < MAX_CLIENT_SESSIONS; i++)
+		{
+			if ((client_fd_table[i] != -1) && FD_ISSET(client_fd_table[i], &rset))
+			{
+				process_client_message(client_fd_table[i]);
+				// Close connection after processing (semantics are "one connection per request")
+				FD_CLR(client_fd_table[i], &allset);
+				close_safe(&(client_fd_table[i]));
+
+				if (--num_ready_fds <= 0)
+				{
+					break;
+				}
+			}
+		}
+	}
+}
+
+// Returns false if stopped due to errors, true if shutdown was requested
 static bool run_mserver_loop()
 {
 	// Usual preparation stuff for select()
@@ -600,7 +677,6 @@ static bool run_mserver_loop()
 	// End-of-file on stdin (e.g. Ctrl+D in a terminal) is used to request shutdown
 	FD_SET(fileno(stdin), &allset);
 	FD_SET(servers_fd, &allset);
-	FD_SET(clients_fd, &allset);
 
 	int max_server_fd = -1;
 	for (int i = 0; i < num_servers; i++)
@@ -609,8 +685,7 @@ static bool run_mserver_loop()
 		max_server_fd = max(max_server_fd, server_nodes[i].socket_fd_in);
 	}
 
-	int maxfd = max(clients_fd, servers_fd);
-	maxfd = max(maxfd, max_server_fd);
+	int maxfd = max(max_server_fd, servers_fd);
 
 	// Metadata server sits in an infinite loop waiting for incoming connections from clients
 	// and for incoming messages from already connected servers and clients
@@ -682,38 +757,6 @@ static bool run_mserver_loop()
 			continue;
 		}
 
-		// Incoming connection from a client
-		if (FD_ISSET(clients_fd, &rset))
-		{
-			int fd_idx = accept_connection(clients_fd, client_fd_table, MAX_CLIENT_SESSIONS);
-			if (fd_idx >= 0)
-			{
-				FD_SET(client_fd_table[fd_idx], &allset);
-				maxfd = max(maxfd, client_fd_table[fd_idx]);
-			}
-
-			if (--num_ready_fds <= 0)
-			{
-				continue;
-			}
-		}
-
-		// Check for any messages from connected clients
-		for (int i = 0; i < MAX_CLIENT_SESSIONS; i++)
-		{
-			if ((client_fd_table[i] != -1) && FD_ISSET(client_fd_table[i], &rset))
-			{
-				process_client_message(client_fd_table[i]);
-				// Close connection after processing (semantics are "one connection per request")
-				FD_CLR(client_fd_table[i], &allset);
-				close_safe(&(client_fd_table[i]));
-
-				if (--num_ready_fds <= 0)
-				{
-					break;
-				}
-			}
-		}
 	}
 }
 
@@ -739,6 +782,10 @@ int main(int argc, char **argv)
 	{
 		return 1;
 	}
+
+	pthread_t client_thread;
+
+	pthread_create(&client_thread, NULL, &run_mserver_client_loop, NULL);
 
 	bool result = run_mserver_loop();
 
