@@ -703,7 +703,7 @@ static bool process_server_message(int fd)
 				log_error("Unable to handle Server B's acknowledgment\n");
 				return false;
 			}
-			break;
+			return true;
 		case UPDATE_SECONDARY_ACKNOWLEDGED:
 			if (fd != server_nodes[serverC].socket_fd_in) {
 				log_error("Wrong server sending UPDATE_SECONDARY_ACKNOWLEDGED\n");
@@ -713,7 +713,7 @@ static bool process_server_message(int fd)
 				log_error("Unable to handle Server C's acknowledgment\n");
 				return false;
 			}
-			break;
+			return true;
 		case UPDATED_PRIMARY:
 			if (!got_Server_B_Acknowledgement) {
 				log_error("Received UPDATED_PRIMARY before acknowledgement\n");
@@ -724,7 +724,7 @@ static bool process_server_message(int fd)
 				HALT_SERVER_A_REQUESTS = true;
 				send_msg_to_server(&(server_nodes[serverB]), SWITCH_PRIMARY);
 			}
-			break;
+			return true;
 		case UPDATED_SECONDARY:
 			if (!got_Server_C_Acknowledgement) {
 				log_error("Received UPDATED_SECONDARY before acknowledgement\n");
@@ -735,11 +735,11 @@ static bool process_server_message(int fd)
 				HALT_SERVER_A_REQUESTS = true;
 				send_msg_to_server(&(server_nodes[serverB]), SWITCH_PRIMARY);
 			}
-			break;
+			return true;
 		case SWITCHED_PRIMARY:
 			// Cleanup all the recovery mode states
 			cleanup_after_recovery_mode();
-			break;
+			return true;
 		default:
 			return false;
 	}
