@@ -136,10 +136,88 @@ static server_node *server_nodes = NULL;
 
 static time_t *last_heartbeats;
 
+
+static bool RECOVERY_MODE = false;
+static bool REDIRECT = false;
+static bool HALT_SERVER_A_REQUESTS = false;
+static bool got_Server_B_Acknowledgement;
+static bool got_Server_C_Acknowledgement = false;
+static bool gotUpdatedPrimary = false;
+static bool gotUpdatedSecondary = false;
 static int failed_server = -1;
+static int serverB = -1;
+static int serverC = -1;
 
 // Threshold that the heartbeats must come within
 #define HEARTBEAT_THRESHOLD 10
+
+static int spawn_server(int sid);
+
+static void cleanup_after_recovery_mode() {
+	RECOVERY_MODE = false;
+	REDIRECT = false;
+	HALT_SERVER_A_REQUESTS = false;
+	got_Server_B_Acknowledgement = false;
+	got_Server_C_Acknowledgement = false;
+	gotUpdatedPrimary = false;
+	gotUpdatedSecondary = false;
+	failed_server = -1;
+	serverB = -1;
+	serverC = -1;
+}
+
+static bool send_msg_to_server(server_node *backup_server, server_ctrlreq_type type)
+{
+	uint16_t port = backup_server->socket_fd_out;
+	char *at = strchr(backup_server->host_name, '@');
+	char *host = (at == NULL) ? backup_server->host_name : (at + 1);
+
+	char req_buffer[MAX_MSG_LEN] = {0};
+	server_ctrl_request *req = (server_ctrl_request *)req_buffer;
+	req->hdr.type = MSG_SERVER_CTRL_REQ;
+	req->type = type;
+
+	int host_name_len = strlen(host) + 1;
+	strncpy(req->host_name, host, host_name_len);
+
+	if (!send_msg(port, req_buffer, sizeof(server_ctrl_request) + host_name_len))
+	{
+		log_error("Unable to send %s to server %d\n", server_ctrlreq_type_str[type], backup_server->sid);
+		return false;
+	}
+
+	return true;
+}
+
+static bool start_recovery(int sid) {
+	RECOVERY_MODE = true;
+
+	if (spawn_server(sid) < 0) {
+		log_error("Cannot spawn new server\n");
+		return false;
+	}
+
+	last_heartbeats[sid] = 0;
+
+	// server_node *server = &server_nodes[sid];
+
+	serverB = secondary_server_id(sid, num_servers);
+	serverC = primary_server_id(sid, num_servers);
+
+	server_node *primary_replica = &server_nodes[serverB];
+	//server_node *secondary_replica = &server_nodes[serverC];
+
+	// uint16_t port = primary_replica->socket_fd_out;
+	// char *at = strchr(server->host_name, '@');
+	// char *host = (at == NULL) ? server->host_name : (at + 1);
+
+	if(!send_msg_to_server(primary_replica, UPDATE_PRIMARY)) {
+		log_error("Unable to start transfer procedure\n");
+		return false;
+	}
+
+	return true;
+}
 
 // Returns true only if there's a failed server
 static bool check_for_failed_server()
@@ -154,7 +232,10 @@ static bool check_for_failed_server()
 		}
 		else if (now - last_heartbeats[i] > HEARTBEAT_THRESHOLD)
 		{
-			failed_server = i;
+			if (!start_recovery(i)) {
+				log_error("Unable to start recovery procedure\n");
+				return true;
+			}
 			log_write("Server %d failed\n", i);
 			return true;
 		}
@@ -527,6 +608,24 @@ static bool init_servers()
 	return true;
 }
 
+static bool handle_server_acknowledgement_in_recovery(int fd) {
+	if (fd == server_nodes[serverB].socket_fd_in) {
+		REDIRECT = true;
+		if(!send_msg_to_server(&(server_nodes[serverC]), UPDATE_SECONDARY)) {
+			log_error("Unable to start transfer procedure\n");
+			return false;
+		}
+		log_write("Received acknowledgement from Server B\n");
+		got_Server_B_Acknowledgement = true;
+	}
+	else {
+		log_write("Received acknowledgement from Server C\n");
+		got_Server_C_Acknowledgement = true;
+	}
+
+	return true;
+}
+
 // Connection will be closed after calling this function regardless of result
 static void process_client_message(int fd)
 {
@@ -547,6 +646,13 @@ static void process_client_message(int fd)
 
 	// TODO: redirect client requests to the secondary replica while the primary is being recovered
 	// ...
+
+	if(HALT_SERVER_A_REQUESTS && server_id == failed_server) {
+		return;
+	}
+	else if (REDIRECT && server_id == failed_server) {
+		server_id = secondary_server_id(server_id, num_servers);
+	}
 
 	// Fill in the response with the key-value server location information
 	char buffer[MAX_MSG_LEN] = {0};
@@ -572,6 +678,10 @@ static bool process_server_message(int fd)
 
 	log_write("%s Receiving a server message\n",
 			  current_time_str(timebuf, TIME_STR_SIZE));
+	
+	// if(RECOVERY_MODE && (fd == server_nodes[serverB].socket_fd_in) || (fd == server_nodes[serverC].socket_fd_in)) {
+	// 	handle_server_acknowledgement_in_recovery(fd);
+	// }
 
 	// Read and parse the message
 	mserver_ctrl_request request = {0};
@@ -580,10 +690,58 @@ static bool process_server_message(int fd)
 		return false;
 	}
 
-	if (request.type == HEARTBEAT)
-	{
-		update_heartbeat(request.server_id);
-		return true;
+	switch(request.type) {
+		case HEARTBEAT:
+			update_heartbeat(request.server_id);
+			return true;
+		case UPDATE_PRIMARY_ACKNOWLEDGED:
+			if (fd != server_nodes[serverB].socket_fd_in) {
+				log_error("Wrong server sending UPDATE_PRIMARY_ACKNOWLEDGED\n");
+				return false;
+			}
+			if(!handle_server_acknowledgement_in_recovery(fd)) {
+				log_error("Unable to handle Server B's acknowledgment\n");
+				return false;
+			}
+			break;
+		case UPDATE_SECONDARY_ACKNOWLEDGED:
+			if (fd != server_nodes[serverC].socket_fd_in) {
+				log_error("Wrong server sending UPDATE_SECONDARY_ACKNOWLEDGED\n");
+				return false;
+			}
+			if(!handle_server_acknowledgement_in_recovery(fd)) {
+				log_error("Unable to handle Server C's acknowledgment\n");
+				return false;
+			}
+			break;
+		case UPDATED_PRIMARY:
+			if (!got_Server_B_Acknowledgement) {
+				log_error("Received UPDATED_PRIMARY before acknowledgement\n");
+				return false;
+			}
+			gotUpdatedPrimary = true;
+			if (gotUpdatedPrimary && gotUpdatedSecondary) {
+				HALT_SERVER_A_REQUESTS = true;
+				send_msg_to_server(&(server_nodes[serverB]), SWITCH_PRIMARY);
+			}
+			break;
+		case UPDATED_SECONDARY:
+			if (!got_Server_C_Acknowledgement) {
+				log_error("Received UPDATED_SECONDARY before acknowledgement\n");
+				return false;
+			}
+			gotUpdatedSecondary = true;
+			if (gotUpdatedPrimary && gotUpdatedSecondary) {
+				HALT_SERVER_A_REQUESTS = true;
+				send_msg_to_server(&(server_nodes[serverB]), SWITCH_PRIMARY);
+			}
+			break;
+		case SWITCHED_PRIMARY:
+			// Cleanup all the recovery mode states
+			cleanup_after_recovery_mode();
+			break;
+		default:
+			return false;
 	}
 
 	return false;

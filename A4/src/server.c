@@ -141,6 +141,63 @@ static void cleanup();
 
 static const int hash_size = 65536;
 
+static bool RECOVERY_MODE = false;
+static bool isServerB = false;
+static bool isServerC = false;
+
+static void send_response_to_mserver(mserver_ctrlreq_type type);
+
+static void cleanup_after_recovery_mode() {
+	RECOVERY_MODE = false;
+	isServerB = false;
+	isServerC = false;
+}
+
+static void *send_key_value_to_server(const char *key, void *value, size_t value_size, void *hash_iterate_args) {
+	operation_request *request = (operation_request *) hash_iterate_args;
+	strncpy(request->key, key, KEY_SIZE);
+	strncpy(request->value, value, value_size);
+	request->hdr.length = sizeof(request) + value_size;
+
+	if (!send_msg(primary_fd, request, request->hdr.length)) {
+		log_error("Error in sending key-value pair to primary server\n");
+	}
+
+	return NULL;
+}
+
+static void *send_data_to_restore_server(void *arg) {
+	hash_table *table = (hash_table *) arg;
+	operation_request request = {0};
+	request.type = OP_PUT;
+	request.hdr.type = MSG_OPERATION_REQ;
+	request.hdr.magic = HDR_MAGIC;
+
+	hash_iterate(table, (hash_iterator *) &send_key_value_to_server, &request);
+
+	send_response_to_mserver(isServerB ? UPDATED_PRIMARY : UPDATE_SECONDARY);
+
+	if (isServerC) {
+		log_write("Server C is cleaning up after recovery mode.\n");
+		cleanup_after_recovery_mode();
+	}
+
+	return NULL;
+}
+
+static void send_response_to_mserver(mserver_ctrlreq_type type) {
+	mserver_ctrl_request message;
+
+	message.hdr.length = sizeof(mserver_ctrl_request);
+	message.hdr.type = MSG_MSERVER_CTRL_REQ;
+	message.type = type;
+
+	if (!send_msg(mserver_fd_out, &message, sizeof(message))) {
+		log_error("Unable to send acknowledgement back to mserver\n");
+	}
+
+}
+
 static void *send_heart_beat()
 {
 	mserver_ctrl_request message;
@@ -297,8 +354,17 @@ static void process_client_message(int fd)
 	// to allow the secondary server to respond to OP_REPCONF requests,
 	// to confirm that replication has succeeded. To check this, we need
 	// to know the primary server id for which this server is the secondary.
+
+	hash_table *target_hash = &primary_hash;
+
 	int key_srv_id = key_server_id(request->key, num_servers);
-	if ((key_srv_id != server_id) && (key_srv_id != primary_sid))
+
+	if (isServerB && secondary_server_id(key_srv_id, num_servers) == server_id) {
+		// Handle saving data in secondary hash and sending data to primary server
+		target_hash = &secondary_hash;
+
+	}
+	else if ((key_srv_id != server_id) && (key_srv_id != primary_sid))
 	{
 		log_error("sid %d: Invalid client key %s sid %d\n", server_id, key_to_str(request->key), key_srv_id);
 		// This should be considered a server failure (e.g. the
@@ -321,7 +387,7 @@ static void process_client_message(int fd)
 		size_t size = 0;
 
 		// Get the value for requested key from the hash table
-		if (!hash_get(&primary_hash, request->key, &data, &size))
+		if (!hash_get(target_hash, request->key, &data, &size))
 		{
 			log_write("Key %s not found\n", key_to_str(request->key));
 			response->status = KEY_NOT_FOUND;
@@ -354,15 +420,15 @@ static void process_client_message(int fd)
 		size_t old_value_sz = 0;
 
 		// Put the <key, value> pair into the hash table
-		hash_lock(&primary_hash, request->key);
-		if (!hash_put(&primary_hash, request->key, value_copy, value_size, &old_value, &old_value_sz))
+		hash_lock(target_hash, request->key);
+		if (!hash_put(target_hash, request->key, value_copy, value_size, &old_value, &old_value_sz))
 		{
 			log_error("sid %d: Out of memory\n", server_id);
 			free(value_copy);
 			response->status = OUT_OF_SPACE;
 			break;
 		}
-		hash_unlock(&primary_hash, request->key);
+		hash_unlock(target_hash, request->key);
 
 		// Forwards the PUT request to the secondary replica
 		send_msg(secondary_fd, request, request->hdr.length);
@@ -545,6 +611,29 @@ static bool process_mserver_message(int fd, bool *shutdown_requested)
 
 		// TODO: handle remaining message types
 		// ...
+	case UPDATE_PRIMARY:
+		RECOVERY_MODE = true;
+		isServerB = true;
+		pthread_t send_data_to_primary_thread;
+		pthread_create(&send_data_to_primary_thread, NULL, &send_data_to_restore_server, &secondary_hash);
+		send_response_to_mserver(UPDATE_PRIMARY_ACKNOWLEDGED);
+		break;
+	
+	case UPDATE_SECONDARY:
+		RECOVERY_MODE = true;
+		isServerC = true;
+		pthread_t send_data_to_secondary_thread;
+		pthread_create(&send_data_to_secondary_thread, NULL, &send_data_to_restore_server, &primary_hash);
+		send_response_to_mserver(UPDATE_SECONDARY_ACKNOWLEDGED);
+		break;
+	
+	case SWITCH_PRIMARY:
+		log_write("Flushing out any in-flight requests\n");
+		sleep(2);
+		send_response_to_mserver(SWITCHED_PRIMARY);
+		log_write("Server B is cleaning up after recovery mode.\n");
+		cleanup_after_recovery_mode();
+		break;
 
 	default: // impossible
 		assert(false);
